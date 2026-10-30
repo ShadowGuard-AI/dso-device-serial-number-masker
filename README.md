@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # dso-device-serial-number-masker
 Masks device serial numbers found in text or configuration files using regular expression matching and replacement with randomly generated alphanumeric strings of similar length and format. - Focused on Tools for sanitizing and obfuscating sensitive data within text files and structured data formats
 
