@@ -4,6 +4,8 @@ import logging
 import random
 import string
 import os
+import sys
+from pathlib import Path
 import chardet
 
 # Configure logging
@@ -11,9 +13,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Define a default set of serial number patterns.  These can be overridden via CLI.
 DEFAULT_SERIAL_PATTERNS = [
-    r"[A-Z0-9]{8}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{12}",  # UUID-like
-    r"SN:[A-Z0-9]{10}",  # Example: SN:ABCDEFGHIJ
-    r"[A-Z0-9]{15,20}", # Example: a long alphanumeric serial
+    r"[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12}",  # UUID-like, any case
+    r"SN:[A-Za-z0-9]{5,}",  # Labelled, example: SN:ABCDEFGHIJ or SN:abc12345
+    r"SN-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+",  # Hyphenated, example: SN-12345-ABCDE
+    r"(?:Serial|SN)[:\s][A-Za-z0-9]{5,}",  # Shorter labelled serial
+    r"[A-Za-z0-9]{4,}(?:-[A-Za-z0-9]{4,})+",  # Hyphenated or segmented serial
+    r"[A-Za-z0-9]{15,20}",  # Long serial, any case
+    r"\b(?=[A-Za-z0-9]{10}\b)(?=[A-Za-z0-9]*[0-9])(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{10}\b",  # Plain 10 character serial
 ]
 
 def generate_random_string(length):
@@ -30,6 +36,21 @@ def generate_random_string(length):
     return ''.join(random.choice(characters) for i in range(length))
 
 
+def mask_value_preserving_format(value):
+    """Mask one value character by character, keeping separators in place."""
+    out = []
+    for ch in value:
+        if ch.isdigit():
+            out.append(random.choice(string.digits))
+        elif ch.isupper():
+            out.append(random.choice(string.ascii_uppercase))
+        elif ch.islower():
+            out.append(random.choice(string.ascii_lowercase))
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
 def mask_serial_number(match):
     """
     Masks a matched serial number with a random string of the same length and character types.
@@ -41,8 +62,8 @@ def mask_serial_number(match):
         str: The masked serial number.
     """
     matched_string = match.group(0)
-    masked_string = generate_random_string(len(matched_string))
-    logging.debug(f"Masking '{matched_string}' with '{masked_string}'")
+    masked_string = mask_value_preserving_format(matched_string)
+    logging.debug(f"Masking a serial value of length {len(matched_string)}")
     return masked_string
 
 
@@ -57,14 +78,39 @@ def mask_serial_numbers_in_text(text, serial_patterns):
     Returns:
         str: The text with serial numbers masked.
     """
-    masked_text = text
+    compiled = []
     for pattern in serial_patterns:
         try:
-            masked_text = re.sub(pattern, mask_serial_number, masked_text)
+            compiled.append(re.compile(pattern))
         except re.error as e:
             logging.error(f"Invalid regular expression: {pattern} - {e}")
-            return None # Indicate failure
-    return masked_text
+            return None, 0
+    # Single pass over the original text: collect non overlapping spans from
+    # every pattern first, so a later pattern can never remask a replacement.
+    spans = []
+    claimed = []
+    for regex in compiled:
+        for m in regex.finditer(text):
+            if m.start() == m.end():
+                continue
+            if any(m.start() < end and start < m.end() for start, end in claimed):
+                continue
+            claimed.append((m.start(), m.end()))
+            spans.append((m.start(), m.end()))
+    spans.sort()
+    cache = {}
+    parts = []
+    pos = 0
+    for start, end in spans:
+        original = text[start:end]
+        if original not in cache:
+            cache[original] = mask_value_preserving_format(original)
+        parts.append(text[pos:start])
+        parts.append(cache[original])
+        pos = end
+    parts.append(text[pos:])
+    logging.debug(f"Masked {len(spans)} serial value(s)")
+    return ''.join(parts), len(spans)
 
 
 def process_file(input_file, output_file, serial_patterns):
@@ -80,9 +126,16 @@ def process_file(input_file, output_file, serial_patterns):
         bool: True on success, False on failure
     """
 
+    if Path(input_file).resolve() == Path(output_file).resolve():
+        logging.error("Output file resolves to the input file; refusing in place output.")
+        return False
+
     try:
         with open(input_file, 'rb') as f:
             raw_data = f.read()
+            if not raw_data:
+                logging.error(f"Input file is empty: {input_file}")
+                return False
             result = chardet.detect(raw_data)
             encoding = result['encoding']
             if encoding is None:
@@ -102,9 +155,13 @@ def process_file(input_file, output_file, serial_patterns):
         logging.error(f"Error reading input file: {input_file} - {e}")
         return False # Indicate failure
 
-    masked_text = mask_serial_numbers_in_text(text, serial_patterns)
+    masked_text, masked_count = mask_serial_numbers_in_text(text, serial_patterns)
 
     if masked_text is None: # Error occurred during masking
+        return False
+
+    if masked_count == 0:
+        logging.error("No serial numbers were masked; no output written.")
         return False
 
     try:
@@ -151,11 +208,12 @@ def main():
     # Input validation:  Basic file existence check
     if not os.path.exists(input_file):
         logging.error(f"Input file does not exist: {input_file}")
-        return
+        sys.exit(1)
 
     if not process_file(input_file, output_file, serial_patterns):
-        #process_file returns False on failure
         logging.error("Serial number masking failed. Check the logs for details.")
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
