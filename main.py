@@ -11,7 +11,14 @@ import chardet
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define a default set of serial number patterns.  These can be overridden via CLI.
+# The order of this list is a priority order, because the masking pass
+# below lets earlier patterns claim their spans first. The breadth near
+# the end is the honest cost of the defaults: the 15 to 20 character
+# alphanumeric pattern cannot tell a serial from a long word, and I have
+# watched it mask the word internationalization in an ordinary sentence.
+# Anyone running the defaults over prose gets those false hits; the
+# patterns flag exists to narrow the list, and the defaults favour
+# catching a serial over sparing a word.
 DEFAULT_SERIAL_PATTERNS = [
     r"[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12}",  # UUID-like, any case
     r"SN:[A-Za-z0-9]{5,}",  # Labelled, example: SN:ABCDEFGHIJ or SN:abc12345
@@ -98,6 +105,13 @@ def mask_serial_numbers_in_text(text, serial_patterns):
             claimed.append((m.start(), m.end()))
             spans.append((m.start(), m.end()))
     spans.sort()
+    # The cache makes masking consistent inside one file: the same serial
+    # string gets the same mask at every occurrence, so a reader can still
+    # tell two mentions are one device without learning which. It also
+    # means the label characters of a labelled pattern are masked along
+    # with the value, SN: coming out as two fresh uppercase letters. The
+    # cache dies with the file, and the draws are unseeded, so the next
+    # file gives the same serial a different mask.
     cache = {}
     parts = []
     pos = 0
